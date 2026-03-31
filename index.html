@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Web FPS - Enhanced</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+        
+        #blocker {
+            position: absolute; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.7);
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            color: white; z-index: 10; transition: opacity 0.3s;
+        }
+        #instructions { text-align: center; cursor: pointer; padding: 40px; border: 2px solid white; border-radius: 10px; background: rgba(0,0,0,0.5); }
+        #instructions h1 { font-size: 50px; margin-bottom: 10px; color: #ffeb3b; }
+        
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 12px; height: 12px; background: transparent;
+            border: 2px solid #00ff00; border-radius: 50%; 
+            transform: translate(-50%, -50%);
+            pointer-events: none; z-index: 5;
+        }
+        #crosshair::after { /* Crosshair dot */
+            content: ""; position: absolute; top: 50%; left: 50%;
+            width: 4px; height: 4px; background: red; border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            color: white; font-size: 24px; font-weight: bold;
+            text-shadow: 2px 2px 4px #000; z-index: 5;
+        }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+</head>
+<body>
+
+    <div id="ui">Score: <span id="scoreVal">0</span></div>
+
+    <div id="blocker">
+        <div id="instructions">
+            <h1>Click to Play</h1>
+            <p><b>W A S D</b> = Move | <b>SPACE</b> = Jump | <b>MOUSE</b> = Look | <b>CLICK</b> = Shoot</p>
+        </div>
+    </div>
+    
+    <div id="crosshair"></div>
+
+    <script>
+        let camera, scene, renderer, controls;
+        let objects = []; // Targets
+        let particles = []; // Explosion debris
+        let raycaster; 
+        let gun; // The weapon model
+        let score = 0;
+
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Setup Scene & Camera
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 0, 750);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1000);
+            camera.position.y = 10;
+
+            // Important: Add camera to scene so objects attached to it (like the gun) render properly
+            scene.add(camera); 
+
+            // 2. Setup Lighting
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 200, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(100, 200, 50);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // 3. Setup Controls
+            controls = new THREE.PointerLockControls(camera, document.body);
+            const blocker = document.getElementById('blocker');
+            const instructions = document.getElementById('instructions');
+
+            instructions.addEventListener('click', () => controls.lock());
+            controls.addEventListener('lock', () => blocker.style.display = 'none');
+            controls.addEventListener('unlock', () => blocker.style.display = 'flex');
+
+            // 4. Create Gun Model and attach to camera
+            gun = new THREE.Group();
+            
+            // Gun Barrel
+            const barrelGeom = new THREE.CylinderGeometry(0.5, 0.5, 6, 16);
+            const gunMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.2 });
+            const barrel = new THREE.Mesh(barrelGeom, gunMat);
+            barrel.rotation.x = Math.PI / 2;
+            
+            // Gun Body
+            const bodyGeom = new THREE.BoxGeometry(2, 3, 5);
+            const body = new THREE.Mesh(bodyGeom, gunMat);
+            body.position.set(0, -1, 3);
+            
+            gun.add(barrel);
+            gun.add(body);
+            
+            // Position gun in the bottom right of the screen
+            gun.position.set(3, -3, -6);
+            camera.add(gun);
+
+            // 5. Build Environment
+            const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+            floorGeometry.rotateX(-Math.PI / 2);
+            // Grid floor texture
+            const gridMat = new THREE.MeshBasicMaterial({ color: 0x222222, wireframe: true });
+            const floor = new THREE.Mesh(floorGeometry, gridMat);
+            scene.add(floor);
+
+            // Spawn Targets
+            const boxGeometry = new THREE.BoxGeometry(10, 10, 10);
+            for (let i = 0; i < 100; i++) {
+                const boxMaterial = new THREE.MeshStandardMaterial({ 
+                    color: Math.random() * 0xffffff,
+                    roughness: 0.4
+                });
+                const box = new THREE.Mesh(boxGeometry, boxMaterial);
+
+                box.position.x = Math.floor(Math.random() * 40 - 20) * 10;
+                box.position.y = Math.floor(Math.random() * 5 + 1) * 5;
+                box.position.z = Math.floor(Math.random() * 40 - 20) * 10;
+                
+                // Don't spawn boxes too close to the player
+                if (box.position.distanceTo(camera.position) > 30) {
+                    scene.add(box);
+                    objects.push(box);
+                }
+            }
+
+            // 6. Input & Shooting Mechanics
+            document.addEventListener('keydown', (e) => handleKey(e.code, true));
+            document.addEventListener('keyup', (e) => handleKey(e.code, false));
+
+            raycaster = new THREE.Raycaster();
+            document.addEventListener('mousedown', shoot);
+
+            // 7. Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function handleKey(code, isDown) {
+            switch (code) {
+                case 'ArrowUp': case 'KeyW': moveForward = isDown; break;
+                case 'ArrowLeft': case 'KeyA': moveLeft = isDown; break;
+                case 'ArrowDown': case 'KeyS': moveBackward = isDown; break;
+                case 'ArrowRight': case 'KeyD': moveRight = isDown; break;
+                case 'Space': if (isDown && canJump) { velocity.y += 350; canJump = false; } break;
+            }
+        }
+
+        function shoot() {
+            if (!controls.isLocked) return;
+
+            // Gun Recoil effect (pushes gun back and up slightly)
+            gun.position.z = -4; 
+            gun.position.y = -2.5;
+            gun.rotation.x = 0.2;
+
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(objects);
+
+            if (intersects.length > 0) {
+                const target = intersects[0].object;
+                
+                // Create explosion at hit point
+                createExplosion(intersects[0].point, target.material.color);
+
+                // Remove object
+                scene.remove(target);
+                objects.splice(objects.indexOf(target), 1);
+
+                // Update Score
+                score += 10;
+                document.getElementById('scoreVal').innerText = score;
+            }
+        }
+
+        function createExplosion(point, color) {
+            const particleGeom = new THREE.BoxGeometry(1, 1, 1);
+            const particleMat = new THREE.MeshBasicMaterial({ color: color });
+
+            for(let i = 0; i < 20; i++) {
+                const mesh = new THREE.Mesh(particleGeom, particleMat);
+                mesh.position.copy(point);
+                scene.add(mesh);
+
+                particles.push({
+                    mesh: mesh,
+                    velocity: new THREE.Vector3(
+                        (Math.random() - 0.5) * 2,
+                        (Math.random() - 0.5) * 2,
+                        (Math.random() - 0.5) * 2
+                    ),
+                    life: 30 // Frames the particle survives
+                });
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now();
+
+            if (controls.isLocked === true) {
+                const delta = (time - prevTime) / 1000;
+
+                // Recover gun position from recoil smoothly (Lerp)
+                gun.position.z += (-6 - gun.position.z) * 10 * delta;
+                gun.position.y += (-3 - gun.position.y) * 10 * delta;
+                gun.rotation.x += (0 - gun.rotation.x) * 10 * delta;
+
+                // Physics & Movement
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 9.8 * 100.0 * delta; // Gravity
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize(); 
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * 500.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 500.0 * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                controls.getObject().position.y += (velocity.y * delta); 
+
+                // Floor collision
+                if (controls.getObject().position.y < 10) {
+                    velocity.y = 0;
+                    controls.getObject().position.y = 10;
+                    canJump = true;
+                }
+
+                // Update Explosion Particles
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    let p = particles[i];
+                    p.mesh.position.add(p.velocity);
+                    p.life--;
+                    if(p.life <= 0) {
+                        scene.remove(p.mesh);
+                        particles.splice(i, 1);
+                    }
+                }
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
